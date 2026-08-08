@@ -1,0 +1,8 @@
+"item","available","role"
+"CRAFT",TRUE,"model under test"
+"changepoint",TRUE,"CRAFT regime segmentation dependency"
+"randomForest",TRUE,"optional tree ensemble baseline"
+"vars",FALSE,"package VAR baseline, unavailable here if FALSE"
+"rugarch",FALSE,"GARCH baseline, unavailable here if FALSE"
+"rmgarch",FALSE,"DCC-GARCH baseline, unavailable here if FALSE"
+"copula",FALSE,"copula scenario baseline, unavailable here if FALSE"

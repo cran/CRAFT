@@ -1,0 +1,229 @@
+---
+title: "Intro to CRAFT"
+author: "Giancarlo Vercellino"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Intro to CRAFT}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4
+)
+```
+
+> "The future enters into us, in order to transform itself in us, long before it happens."
+> - Rainer Maria Rilke
+>
+> "Time discovers truth."
+> - Seneca
+>
+> "All models are wrong, but some are useful."
+> - George E. P. Box
+
+## CRAFTing future trajectories without pretending to own the future
+
+CRAFT stands for **Conditional Regime Analog Forecasting with Trajectories**.
+It asks a simple, practical question: when the latest trajectory looks like
+this, which historical future trajectories tended to follow?
+
+No prophecy, no fog machine, no heroic point forecast wearing a cape. CRAFT
+keeps the workflow probabilistic: it turns recent movement profiles into regime
+labels, estimates what those labels usually lead to, samples matching historical
+future trajectories, and then fits smooth forecast distributions. The point is
+not to declare that tomorrow has been solved. The point is to keep uncertainty
+organized enough that it can sit at the table and use cutlery.
+
+## The CRAFT package works this way
+
+1. **Trajectory preparation.** `trajectory_embedding()` converts each numeric
+   series into past and future cumulative-change windows. Past windows describe
+   what was known at a time point. Future windows describe what happened next.
+
+2. **Regime detection.** `svd_changepoint_regimes()` compresses trajectory
+   matrices with singular value decomposition and detects changepoint-based
+   regimes on the resulting factors. This keeps the regime map compact even
+   when several assets and horizons are involved.
+
+3. **Conditional transitions.** `craft_fit()` learns how past-regime labels map
+   into future-regime labels. The transition model is intentionally modest: it
+   estimates conditional probabilities and leaves the drama to the data.
+
+4. **Analog sampling.** Historical future trajectories are resampled according
+   to the latest regime probabilities. Optional tail penalties can make extreme
+   analogues less eager to jump into the forecast parade.
+
+5. **Forecast distributions.** `trajectory_forecast()` fits smooth empirical
+   distributions to sampled trajectory draws, optionally reconstructing them
+   into level forecasts from the latest observed values.
+
+## A tiny demo, because forecasts should have manners
+
+We start with three synthetic level series. They share a little common movement,
+but not enough to become a committee.
+
+```{r setup}
+library(CRAFT)
+
+set.seed(42)
+n <- 120
+market_pulse <- cumsum(rnorm(n, mean = 0, sd = 0.004))
+rate_pulse <- cumsum(rnorm(n, mean = 0, sd = 0.003))
+
+series <- data.frame(
+  asset_a = cumprod(1 + 0.0010 + market_pulse + rnorm(n, 0, 0.008)),
+  asset_b = cumprod(1 + 0.0005 + 0.6 * market_pulse - 0.2 * rate_pulse +
+                      rnorm(n, 0, 0.010)),
+  asset_c = cumprod(1 + 0.0008 - 0.3 * market_pulse + 0.5 * rate_pulse +
+                      rnorm(n, 0, 0.007))
+)
+
+tail(series, 3)
+```
+
+## 1. Fold the history into trajectories
+
+A trajectory window is a compact profile of cumulative changes. Backward-looking
+windows feed the regime detector; forward-looking windows become the pool of
+historical analogues.
+
+```{r trajectories}
+trajectories <- trajectory_embedding(series, trajectory_window = 5)
+
+names(trajectories)
+dim(trajectories$past_trajectories)
+dim(trajectories$future_trajectories)
+
+head(round(trajectories$past_trajectories[, 1:5], 4), 3)
+```
+
+## 2. Fit a smooth distribution from trajectory draws
+
+Before fitting the full model, we can use `trajectory_forecast()` directly. Here
+we take the realized future trajectories for one asset and estimate a predictive
+interface with density, distribution, quantile, and random-generation functions.
+Very civilized. Almost suspiciously civilized.
+
+```{r trajectory-forecast}
+asset_a_cols <- grep(
+  "^asset_a_cum_lead_",
+  colnames(trajectories$future_trajectories),
+  value = TRUE
+)
+asset_a_draws <- as.data.frame(trajectories$future_trajectories[, asset_a_cols, drop = FALSE])
+
+asset_a_fc <- trajectory_forecast(
+  asset_a_draws,
+  probs = seq(0.05, 0.95, length.out = 40),
+  min_unique = 5,
+  verbose = FALSE
+)
+
+names(asset_a_fc)
+asset_a_fc[["asset_a_cum_lead_5"]]$qfun(c(0.05, 0.50, 0.95))
+```
+
+## 3. Fit CRAFT end to end
+
+Now we let `craft_fit()` run the whole sequence: trajectory embedding, regime
+labelling, conditional transition probabilities, future-trajectory sampling,
+and forecast distribution fitting. The settings below are deliberately small so
+the vignette does not ask your laptop fan to write a resignation letter.
+
+```{r craft-fit}
+fit <- craft_fit(
+  series,
+  window = 5,
+  n_draws = 80,
+  n_factors = 1,
+  min_segment = 5,
+  max_regimes_per_factor = 3,
+  n_testing = 0,
+  return_train_probs = FALSE,
+  verbose = FALSE,
+  seed = 123
+)
+
+class(fit)
+fit$valid_joint_acc
+names(fit$return_dists)
+```
+
+The fitted object keeps both the machinery and the useful bits: trajectory
+matrices, regime models, latest labels, transition probabilities, sampled
+future trajectories, fitted return distributions, fitted level distributions,
+and diagnostics.
+
+```{r inspect-fit}
+dim(fit$trajectory_draws)
+names(fit$diagnostics)
+
+round(fit$sampler_weights, 3)
+round(fit$diagnostics$posterior_entropy, 3)
+```
+
+## 4. Predict again, because the future keeps moving
+
+`craft_predict()` reuses the fitted model. With no `newdata`, it resamples from
+the latest trajectory already stored in the fit. With `newdata`, it transforms a
+fresh history and runs the same conditional analogue logic again.
+
+```{r craft-predict}
+pred <- craft_predict(fit, n_draws = 50, seed = 7)
+
+class(pred)
+dim(pred$trajectory_draws)
+
+horizon_name <- tail(names(pred$return_dists$asset_a), 1)
+pred$return_dists$asset_a[[horizon_name]]$qfun(c(0.05, 0.50, 0.95))
+```
+
+You can also request only the part you need. This is helpful when a dashboard
+wants sampled trajectories while another report wants regime probabilities.
+Different rooms, same house.
+
+```{r prediction-types}
+labels <- craft_predict(fit, type = "labels")
+probs <- craft_predict(fit, type = "probabilities")
+draws <- craft_predict(fit, type = "trajectory_draws", n_draws = 10, seed = 9)
+
+labels
+lapply(probs, function(x) round(x[1, ], 3))
+dim(draws)
+```
+
+## 5. What to look at when the model returns
+
+A few practical habits help:
+
+- Inspect `fit$valid_joint_acc` and the transition diagnostics. They tell you
+  whether the regime transition model is learning anything more useful than a
+  shrug.
+- Inspect `fit$diagnostics$posterior_entropy`. High entropy means the latest
+  regime probabilities are diffuse. That is not necessarily bad; it may be the
+  model being appropriately humble.
+- Inspect `fit$trajectory_draws`. These are the sampled analogue futures. If
+  they look absurd, the distributions fitted on top of them will be beautifully
+  absurd, which is still absurd.
+- Use `fit$level_dists` when you want forecast levels and `fit$return_dists`
+  when you want cumulative-change forecasts.
+
+## Final thoughts
+
+CRAFT is a memory-based probabilistic forecasting workflow: profile the recent
+past, find comparable regime structure, sample what historically came next, and
+wrap the result in forecast distributions that can answer quantile, density,
+probability, and simulation questions.
+
+It will not make time behave. Time has never accepted calendar invites from
+models. But CRAFT gives the next trajectory a disciplined set of historical
+analogues, and that is often a much better conversation than a lonely point
+forecast pretending to be certain.
+
+Enzoi.
