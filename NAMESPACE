@@ -1,3 +1,4 @@
+export(craft_autotune)
 export(trajectory_forecast)
 export(trajectory_reframer)
 export(trajectory_embedding)

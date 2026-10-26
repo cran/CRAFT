@@ -214,6 +214,67 @@ A few practical habits help:
 - Use `fit$level_dists` when you want forecast levels and `fit$return_dists`
   when you want cumulative-change forecasts.
 
+## 6. Tune the parameters with internal backtests
+
+`craft_autotune()` adapts random search to the same `craft_fit()` and
+`craft_predict()` interface. Each candidate is fitted on the supplied history;
+its score comes from the internal rolling-origin backtest, whose fits see only
+observations available at their origin. The retained fit uses the full supplied
+history and is ready for prediction.
+
+```{r craft-autotune}
+tuned <- craft_autotune(
+  series, n_models = 2, top_k = 1, n_testing = 2,
+  search_space = list(transition_alpha = c(0.5, 1, 2)),
+  fixed_args = list(window = 5, horizon = 5, n_draws = 40,
+                   n_factors = 1, min_segment = 5,
+                   max_regimes_per_factor = 3),
+  seed = 123, verbose = FALSE
+)
+tuned$results[, c("model_id", "ok", "score", "transition_alpha")]
+if (length(tuned$top_models)) {
+  best_fit <- tuned$top_models[[1]]$fit
+  tuned_prediction <- craft_predict(best_fit, n_draws = 25, seed = 7)
+  class(tuned_prediction)
+}
+```
+
+Candidate vectors and scalar constants are supported, as are zero-argument
+sampler functions and typed specifications:
+
+```{r search-specifications, eval=FALSE}
+search_space <- list(
+  window = list(type = "integer", min = 5, max = 10),
+  transition_alpha = list(type = "numeric", min = 0.1, max = 5, log = TRUE),
+  sampler_weight = list(type = "choice", values = c("uniform", "bal_acc")),
+  tail_penalty_lambda = function() runif(1, 0, 0.5)
+)
+```
+
+Sampled settings override `fixed_args`, which override arguments in `...`.
+Search results remain in candidate order; `top_models` is ordered by increasing
+score. Direction accuracy is negated; coverage scoring uses the absolute gap
+from 90%. The `composite` metric averages weighted normalized ranks across
+error, coverage, direction, and probability-calibration components. Unspecified
+component weights are one; set a component weight to zero to exclude it.
+Composite scores depend on the candidate pool and are not absolute error measures.
+
+Failed fits, empty summaries, non-finite scores, and failed backtest origins are
+recorded in `failures` with infinite scores. If every candidate fails, the
+function warns and returns an empty `top_models` list. Set `keep_all_fits = TRUE`
+to keep all fitted objects, with `NULL` entries for failures.
+
+For larger searches, `search_parallel = TRUE` uses two workers by default;
+`search_workers` can set an explicit limit. Nested backtest parallelism is
+disabled during parallel search. The same seed and search specifications give
+the same candidate draws and per-model seeds in serial and parallel execution.
+Sampler functions should use R's random-number generator and avoid external state.
+
+When tuning `window` or `min_segment`, keep `horizon` and
+`backtest_min_train` fixed to compare the same origins and forecast outcomes.
+Always inspect candidate failures. Reserve a later holdout period for final
+evaluation: tuning backtests alone do not estimate performance after selection.
+
 ## Final thoughts
 
 CRAFT is a memory-based probabilistic forecasting workflow: profile the recent

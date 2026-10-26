@@ -56,11 +56,41 @@ Lower-level functions are available for custom pipelines:
 - `denoiser()` selects informative numeric features before regime detection.
 - `time_volume_weights()` creates volume-derived observation weights.
 
-## CRAN submission note
+## Hyperparameter tuning
 
-Before submitting to CRAN, replace the placeholder maintainer email in
-`DESCRIPTION` with the real maintainer email address.
+`craft_autotune()` samples candidate settings and ranks their internal backtest
+scores. Lower scores are better; direction accuracy is negated for ranking.
+
+```r
+tuned <- craft_autotune(
+  series, n_models = 2, top_k = 1, n_testing = 2,
+  search_space = list(transition_alpha = c(0.5, 1, 2)),
+  fixed_args = list(window = 5, horizon = 5, n_draws = 40,
+                   n_factors = 1, min_segment = 5,
+                   max_regimes_per_factor = 3),
+  seed = 123, verbose = FALSE
+)
+tuned$results
+if (length(tuned$top_models)) {
+  best_fit <- tuned$top_models[[1]]$fit
+  prediction <- craft_predict(best_fit, n_draws = 25, seed = 7)
+}
+```
+
+Search specifications may be candidate vectors, scalar constants, zero-argument
+sampler functions, or lists such as `list(type = "numeric", min = 0.1,
+max = 10, log = TRUE)`. Sampled settings override `fixed_args`, which override
+arguments in `...`. An empty `search_space = list()` repeats the fixed settings
+with different model seeds. Optional `search_parallel = TRUE` uses two workers
+by default and disables nested backtest parallelism. Serial backtests are also
+the default during serial search; pass `backtest_parallel = TRUE` explicitly
+to enable them.
+
+Keep `horizon` and `backtest_min_train` fixed when comparing different windows
+or segment lengths so candidates are evaluated on the same outcomes. Inspect
+`tuned$failures` before using the selected fit. These backtests select parameters;
+use a separate, later holdout period to assess the selected model's performance.
 
 ## License
 
-MIT + file LICENSE
+GPL-3

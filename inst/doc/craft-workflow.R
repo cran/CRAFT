@@ -94,3 +94,27 @@ labels
 lapply(probs, function(x) round(x[1, ], 3))
 dim(draws)
 
+## ----craft-autotune-----------------------------------------------------------
+tuned <- craft_autotune(
+  series, n_models = 2, top_k = 1, n_testing = 2,
+  search_space = list(transition_alpha = c(0.5, 1, 2)),
+  fixed_args = list(window = 5, horizon = 5, n_draws = 40,
+                   n_factors = 1, min_segment = 5,
+                   max_regimes_per_factor = 3),
+  seed = 123, verbose = FALSE
+)
+tuned$results[, c("model_id", "ok", "score", "transition_alpha")]
+if (length(tuned$top_models)) {
+  best_fit <- tuned$top_models[[1]]$fit
+  tuned_prediction <- craft_predict(best_fit, n_draws = 25, seed = 7)
+  class(tuned_prediction)
+}
+
+## ----search-specifications, eval=FALSE----------------------------------------
+# search_space <- list(
+#   window = list(type = "integer", min = 5, max = 10),
+#   transition_alpha = list(type = "numeric", min = 0.1, max = 5, log = TRUE),
+#   sampler_weight = list(type = "choice", values = c("uniform", "bal_acc")),
+#   tail_penalty_lambda = function() runif(1, 0, 0.5)
+# )
+
