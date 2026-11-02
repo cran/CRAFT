@@ -40,7 +40,7 @@ test_that("invalid tuning controls fail before fitting", {
   expect_error(craft_autotune(x, composite_weights = c(foo = 1)), "composite_weights")
   expect_error(craft_autotune(x, composite_weights = c(return_rmse = -1)), "composite_weights")
   expect_error(craft_autotune(x, search_parallel = TRUE,
-                            search_space = list(backtest_parallel = TRUE)), "Cannot tune")
+                            search_space = list(backtest_parallel = TRUE)), "cannot be tuned")
 })
 
 test_that("tuning ranks current craft fits reproducibly and predicts", {

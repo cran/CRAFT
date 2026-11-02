@@ -1,7 +1,7 @@
 Package: CRAFT
 Type: Package
 Title: Conditional Regime Analog Forecasting with Trajectories
-Version: 0.2.0
+Version: 0.4.0
 Authors@R: c(person("Giancarlo", "Vercellino", role = c("aut", "cre", "cph"), email = "giancarlo.vercellino@gmail.com"))
 Maintainer: Giancarlo Vercellino <giancarlo.vercellino@gmail.com>
 Description: Tools for Conditional Regime Analog Forecasting with Trajectories.
@@ -10,6 +10,8 @@ Description: Tools for Conditional Regime Analog Forecasting with Trajectories.
     transition probabilities between regimes, samples future-trajectory
     analogues, and fits smooth empirical forecast distributions. Random-search
     hyperparameter tuning ranks candidate models using internal backtests.
+    The tuner supports staged evaluation, shared-computation
+    caching, and deferred fitting of selected models.
 License: GPL-3
 RoxygenNote: 7.3.3
 Depends: R (>= 4.1.0)
@@ -20,7 +22,7 @@ VignetteBuilder: knitr
 Config/testthat/edition: 3
 URL: https://rpubs.com/giancarlo_vercellino/craft
 NeedsCompilation: no
-Packaged: 2026-10-26 11:49:56 UTC; gianc
+Packaged: 2026-11-01 17:44:18 UTC; gianc
 Author: Giancarlo Vercellino [aut, cre, cph]
 Repository: CRAN
-Date/Publication: 2026-10-26 15:00:08 UTC
+Date/Publication: 2026-11-02 07:50:09 UTC

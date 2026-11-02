@@ -12,7 +12,7 @@
 
 <meta name="author" content="Giancarlo Vercellino" />
 
-<meta name="date" content="2026-10-26" />
+<meta name="date" content="2026-11-01" />
 
 <title>Intro to CRAFT</title>
 
@@ -341,7 +341,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Intro to CRAFT</h1>
 <h4 class="author">Giancarlo Vercellino</h4>
-<h4 class="date">2026-10-26</h4>
+<h4 class="date">2026-11-01</h4>
 
 
 
@@ -571,66 +571,89 @@ of them will be beautifully absurd, which is still absurd.</li>
 forecasts.</li>
 </ul>
 </div>
-<div id="tune-the-parameters-with-internal-backtests" class="section level2">
-<h2>6. Tune the parameters with internal backtests</h2>
-<p><code>craft_autotune()</code> adapts random search to the same
-<code>craft_fit()</code> and <code>craft_predict()</code> interface.
-Each candidate is fitted on the supplied history; its score comes from
-the internal rolling-origin backtest, whose fits see only observations
-available at their origin. The retained fit uses the full supplied
-history and is ready for prediction.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>tuned <span class="ot">&lt;-</span> <span class="fu">craft_autotune</span>(</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  series, <span class="at">n_models =</span> <span class="dv">2</span>, <span class="at">top_k =</span> <span class="dv">1</span>, <span class="at">n_testing =</span> <span class="dv">2</span>,</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">search_space =</span> <span class="fu">list</span>(<span class="at">transition_alpha =</span> <span class="fu">c</span>(<span class="fl">0.5</span>, <span class="dv">1</span>, <span class="dv">2</span>)),</span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">fixed_args =</span> <span class="fu">list</span>(<span class="at">window =</span> <span class="dv">5</span>, <span class="at">horizon =</span> <span class="dv">5</span>, <span class="at">n_draws =</span> <span class="dv">40</span>,</span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>                   <span class="at">n_factors =</span> <span class="dv">1</span>, <span class="at">min_segment =</span> <span class="dv">5</span>,</span>
-<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>                   <span class="at">max_regimes_per_factor =</span> <span class="dv">3</span>),</span>
-<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">123</span>, <span class="at">verbose =</span> <span class="cn">FALSE</span></span>
-<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>)</span>
-<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>tuned<span class="sc">$</span>results[, <span class="fu">c</span>(<span class="st">&quot;model_id&quot;</span>, <span class="st">&quot;ok&quot;</span>, <span class="st">&quot;score&quot;</span>, <span class="st">&quot;transition_alpha&quot;</span>)]</span>
-<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a><span class="co">#&gt;   model_id   ok      score transition_alpha</span></span>
-<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a><span class="co">#&gt; 1        1 TRUE 0.03172389                2</span></span>
-<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a><span class="co">#&gt; 2        2 TRUE 0.03174859                2</span></span>
-<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">length</span>(tuned<span class="sc">$</span>top_models)) {</span>
-<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>  best_fit <span class="ot">&lt;-</span> tuned<span class="sc">$</span>top_models[[<span class="dv">1</span>]]<span class="sc">$</span>fit</span>
-<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a>  tuned_prediction <span class="ot">&lt;-</span> <span class="fu">craft_predict</span>(best_fit, <span class="at">n_draws =</span> <span class="dv">25</span>, <span class="at">seed =</span> <span class="dv">7</span>)</span>
-<span id="cb8-16"><a href="#cb8-16" tabindex="-1"></a>  <span class="fu">class</span>(tuned_prediction)</span>
-<span id="cb8-17"><a href="#cb8-17" tabindex="-1"></a>}</span>
-<span id="cb8-18"><a href="#cb8-18" tabindex="-1"></a><span class="co">#&gt; [1] &quot;craft_prediction&quot;           &quot;regime_forecast_prediction&quot;</span></span></code></pre></div>
-<p>Candidate vectors and scalar constants are supported, as are
-zero-argument sampler functions and typed specifications:</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>search_space <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  <span class="at">window =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;integer&quot;</span>, <span class="at">min =</span> <span class="dv">5</span>, <span class="at">max =</span> <span class="dv">10</span>),</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">transition_alpha =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;numeric&quot;</span>, <span class="at">min =</span> <span class="fl">0.1</span>, <span class="at">max =</span> <span class="dv">5</span>, <span class="at">log =</span> <span class="cn">TRUE</span>),</span>
-<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">sampler_weight =</span> <span class="fu">list</span>(<span class="at">type =</span> <span class="st">&quot;choice&quot;</span>, <span class="at">values =</span> <span class="fu">c</span>(<span class="st">&quot;uniform&quot;</span>, <span class="st">&quot;bal_acc&quot;</span>)),</span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  <span class="at">tail_penalty_lambda =</span> <span class="cf">function</span>() <span class="fu">runif</span>(<span class="dv">1</span>, <span class="dv">0</span>, <span class="fl">0.5</span>)</span>
-<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>)</span></code></pre></div>
-<p>Sampled settings override <code>fixed_args</code>, which override
-arguments in <code>...</code>. Search results remain in candidate order;
-<code>top_models</code> is ordered by increasing score. Direction
-accuracy is negated; coverage scoring uses the absolute gap from 90%.
-The <code>composite</code> metric averages weighted normalized ranks
-across error, coverage, direction, and probability-calibration
-components. Unspecified component weights are one; set a component
-weight to zero to exclude it. Composite scores depend on the candidate
-pool and are not absolute error measures.</p>
-<p>Failed fits, empty summaries, non-finite scores, and failed backtest
-origins are recorded in <code>failures</code> with infinite scores. If
-every candidate fails, the function warns and returns an empty
-<code>top_models</code> list. Set <code>keep_all_fits = TRUE</code> to
-keep all fitted objects, with <code>NULL</code> entries for
-failures.</p>
-<p>For larger searches, <code>search_parallel = TRUE</code> uses two
-workers by default; <code>search_workers</code> can set an explicit
-limit. Nested backtest parallelism is disabled during parallel search.
-The same seed and search specifications give the same candidate draws
-and per-model seeds in serial and parallel execution. Sampler functions
-should use R’s random-number generator and avoid external state.</p>
-<p>When tuning <code>window</code> or <code>min_segment</code>, keep
-<code>horizon</code> and <code>backtest_min_train</code> fixed to
-compare the same origins and forecast outcomes. Always inspect candidate
-failures. Reserve a later holdout period for final evaluation: tuning
-backtests alone do not estimate performance after selection.</p>
+<div id="tune-the-parameters-with-staged-random-search" class="section level2">
+<h2>6. Tune the parameters with staged random search</h2>
+<p><code>craft_autotune()</code> uses staged random search and empirical
+backtest metrics. Its scoring fits stop after trajectory sampling; they
+do not fit the smooth forecast distributions or compute correlation
+diagnostics. Only the selected configurations are fitted on the full
+history to produce complete objects for
+<code>craft_predict()</code>.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>fast <span class="ot">&lt;-</span> <span class="fu">craft_autotune</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  series, <span class="at">n_models =</span> <span class="dv">4</span>, <span class="at">top_k =</span> <span class="dv">1</span>, <span class="at">n_testing =</span> <span class="dv">3</span>,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">stage_budgets =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">3</span>), <span class="at">survivor_fraction =</span> <span class="fl">0.5</span>,</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">search_space =</span> <span class="fu">list</span>(<span class="at">transition_alpha =</span> <span class="fu">c</span>(<span class="fl">0.5</span>, <span class="dv">1</span>, <span class="dv">2</span>)),</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>  <span class="at">fixed_args =</span> <span class="fu">list</span>(<span class="at">window =</span> <span class="dv">5</span>, <span class="at">horizon =</span> <span class="dv">5</span>, <span class="at">n_draws =</span> <span class="dv">40</span>,</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>                   <span class="at">n_factors =</span> <span class="dv">1</span>, <span class="at">min_segment =</span> <span class="dv">5</span>,</span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a>                   <span class="at">max_regimes_per_factor =</span> <span class="dv">3</span>),</span>
+<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">123</span>, <span class="at">verbose =</span> <span class="cn">FALSE</span></span>
+<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>)</span>
+<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>fast<span class="sc">$</span>results[, <span class="fu">c</span>(<span class="st">&quot;model_id&quot;</span>, <span class="st">&quot;score&quot;</span>, <span class="st">&quot;n_testing&quot;</span>, <span class="st">&quot;status&quot;</span>, <span class="st">&quot;selected&quot;</span>)]</span>
+<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a><span class="co">#&gt;   model_id      score n_testing   status selected</span></span>
+<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a><span class="co">#&gt; 1        1 0.03214792         2 screened    FALSE</span></span>
+<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a><span class="co">#&gt; 2        2 0.02498080         3 finalist    FALSE</span></span>
+<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a><span class="co">#&gt; 3        3 0.02366525         3 finalist     TRUE</span></span>
+<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a><span class="co">#&gt; 4        4 0.02914695         2 screened    FALSE</span></span>
+<span id="cb8-16"><a href="#cb8-16" tabindex="-1"></a><span class="fu">vapply</span>(fast<span class="sc">$</span>stages, <span class="cf">function</span>(x) <span class="fu">length</span>(x<span class="sc">$</span>promoted), <span class="fu">integer</span>(<span class="dv">1</span>))</span>
+<span id="cb8-17"><a href="#cb8-17" tabindex="-1"></a><span class="co">#&gt; [1] 2 2</span></span>
+<span id="cb8-18"><a href="#cb8-18" tabindex="-1"></a><span class="fu">sum</span>(fast<span class="sc">$</span>performance<span class="sc">$</span>origins_computed)</span>
+<span id="cb8-19"><a href="#cb8-19" tabindex="-1"></a><span class="co">#&gt; [1] 10</span></span>
+<span id="cb8-20"><a href="#cb8-20" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">length</span>(fast<span class="sc">$</span>top_models)) {</span>
+<span id="cb8-21"><a href="#cb8-21" tabindex="-1"></a>  fast_prediction <span class="ot">&lt;-</span> <span class="fu">craft_predict</span>(fast<span class="sc">$</span>top_models[[<span class="dv">1</span>]]<span class="sc">$</span>fit, <span class="at">seed =</span> <span class="dv">7</span>)</span>
+<span id="cb8-22"><a href="#cb8-22" tabindex="-1"></a>  <span class="fu">class</span>(fast_prediction)</span>
+<span id="cb8-23"><a href="#cb8-23" tabindex="-1"></a>}</span>
+<span id="cb8-24"><a href="#cb8-24" tabindex="-1"></a><span class="co">#&gt; [1] &quot;craft_prediction&quot;           &quot;regime_forecast_prediction&quot;</span></span></code></pre></div>
+<p>An explicit <code>search_space</code> replaces the default space. The
+example searches only <code>transition_alpha</code>; the trajectory
+window remains fixed at 5. Sampled settings override
+<code>fixed_args</code>, which override <code>...</code>, so omit fixed
+parameters from <code>search_space</code>. Candidate vectors, scalar
+constants, zero-argument sampler functions, and typed choice, integer,
+numeric, and log-scale ranges are supported.</p>
+<p>The first stage evaluates origins spanning a common grid. Promoted
+candidates add origins in later stages, retaining each origin’s original
+seed and reusing its completed scoring results. At least
+<code>top_k</code> successful candidates are promoted when available. A
+screened candidate’s score uses fewer origins and should not be ranked
+against final-stage scores. Composite ranks are relative to the
+candidates present in each stage. Screening can lose a strong model
+because its early score is noisy; reserve a later holdout period for
+evaluation.</p>
+<p>To evaluate every candidate at the full budget, use
+<code>stage_budgets = n_testing</code>. Disabling the cache with
+<code>cache = FALSE</code> preserves scores for identical seeds and
+deterministic settings. The tuner automatically uses common origins
+across feasible configurations; also fix <code>horizon</code> when
+comparing different trajectory windows. A <code>NULL</code> horizon
+scores all horizons through each candidate’s own window, which can
+change the outcomes being compared.</p>
+<p>Embeddings and identical deterministic regime fits are cached per
+search and training prefix. Reusing a regime fit avoids repeating its
+denoising, SVD, and changepoint calculations. Different structural
+settings still need separate regime fits. Bootstrap, explicitly seeded,
+and plotting regime calls bypass regime caching. <code>cache_size</code>
+bounds the number of entries per process, rather than their total byte
+size; reduce it when memory is constrained.</p>
+<p>For larger searches, set
+<code>search_parallel = TRUE, search_workers = 2</code>. Each worker
+receives the immutable history once, keeps its cache across stages, and
+picks up another candidate when it finishes. Workers return compact
+scoring data rather than fitted model objects. Their timing and
+cache-hit counts can depend on scheduling, while scores retain their
+per-model, per-origin seeds. Nested backtest parallelism and
+training-probability output are disabled.</p>
+<p><code>keep_all_fits = TRUE</code> requests full refits even for
+successfully scored screened candidates. It is useful for inspection but
+increases time and memory use. Scoring failures appear in
+<code>failures</code>; full-refitting errors appear separately in
+<code>refit_failures</code>. Selected fits retain the compact backtest
+predictions and summaries used for selection, alongside their complete
+forecast distributions.</p>
+<p>The installed benchmark script provides a reproducible comparison of
+the uncached full-budget tuning, cached full-budget tuning, and staged
+tuning:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a><span class="fu">system.file</span>(<span class="st">&quot;benchmarks&quot;</span>, <span class="st">&quot;compare_autotune_speed.R&quot;</span>, <span class="at">package =</span> <span class="st">&quot;CRAFT&quot;</span>)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a><span class="co">#&gt; [1] &quot;C:/Users/gianc/AppData/Local/Temp/RtmpiYGaJ5/Rinst3f3417534683/CRAFT/benchmarks/compare_autotune_speed.R&quot;</span></span></code></pre></div>
 </div>
 <div id="final-thoughts" class="section level2">
 <h2>Final thoughts</h2>

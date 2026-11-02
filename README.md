@@ -58,38 +58,58 @@ Lower-level functions are available for custom pipelines:
 
 ## Hyperparameter tuning
 
-`craft_autotune()` samples candidate settings and ranks their internal backtest
-scores. Lower scores are better; direction accuracy is negated for ranking.
+`craft_autotune()` uses staged random search with scoring-only backtests,
+bounded caching, dynamically scheduled parallel workers, and deferred full
+fitting of selected candidates. The accelerated engine is now the only public
+tuner; calls previously using `craft_autotune_fast()` should use this name.
 
 ```r
 tuned <- craft_autotune(
-  series, n_models = 2, top_k = 1, n_testing = 2,
-  search_space = list(transition_alpha = c(0.5, 1, 2)),
-  fixed_args = list(window = 5, horizon = 5, n_draws = 40,
+  series, n_models = 12, top_k = 2, n_testing = 5,
+  stage_budgets = c(2, 5), survivor_fraction = 0.3,
+  search_space = list(transition_alpha = c(0.25, 0.5, 1, 2),
+                      sampler_weight = c("uniform", "bal_acc")),
+  fixed_args = list(window = 5, horizon = 5, n_draws = 250,
                    n_factors = 1, min_segment = 5,
                    max_regimes_per_factor = 3),
-  seed = 123, verbose = FALSE
+  search_parallel = TRUE, search_workers = 2,
+  seed = 42, verbose = FALSE
 )
-tuned$results
+tuned$results[, c("model_id", "score", "n_testing", "status", "selected")]
 if (length(tuned$top_models)) {
-  best_fit <- tuned$top_models[[1]]$fit
-  prediction <- craft_predict(best_fit, n_draws = 25, seed = 7)
+  prediction <- craft_predict(tuned$top_models[[1]]$fit)
 }
 ```
 
-Search specifications may be candidate vectors, scalar constants, zero-argument
-sampler functions, or lists such as `list(type = "numeric", min = 0.1,
-max = 10, log = TRUE)`. Sampled settings override `fixed_args`, which override
-arguments in `...`. An empty `search_space = list()` repeats the fixed settings
-with different model seeds. Optional `search_parallel = TRUE` uses two workers
-by default and disables nested backtest parallelism. Serial backtests are also
-the default during serial search; pass `backtest_parallel = TRUE` explicitly
-to enable them.
+An explicit `search_space` replaces the default search space. In the example,
+only transition smoothing and sampler weights are searched; `window` stays at
+5. Sampled settings override `fixed_args`, which override `...`, so omit fixed
+parameters from the search space. Specifications support scalar constants,
+candidate vectors, zero-argument sampler functions, and typed choice, integer,
+numeric, or log-scale ranges. An empty list repeats the fixed configuration
+with different model seeds.
 
-Keep `horizon` and `backtest_min_train` fixed when comparing different windows
-or segment lengths so candidates are evaluated on the same outcomes. Inspect
-`tuned$failures` before using the selected fit. These backtests select parameters;
-use a separate, later holdout period to assess the selected model's performance.
+Screened candidates have lower-budget scores; compare finalists when selecting
+a model. `top_models` does this automatically. Set `stage_budgets = n_testing`
+to evaluate every candidate at the full budget. Screening and fewer draws can
+change rankings. Reserve a later holdout period for performance evaluation.
+
+The tuner uses common origins across feasible candidates. Fix `horizon` when
+tuning windows so candidates also forecast the same outcomes. Caches are scoped
+to each search, worker, and training prefix. They reuse trajectory embeddings
+and identical deterministic regime fits, including SVD work. `cache_size`
+limits entries per worker, not bytes. Bootstrap, explicitly seeded, or plotting
+regime calls bypass regime caching.
+
+Parallel workers receive the history once and return compact scoring data.
+Nested parallelism and training-probability output are disabled. By default,
+only selected finalists are fitted in full; `keep_all_fits = TRUE` additionally
+refits screened candidates, increasing runtime and memory use.
+
+Inspect `failures`, `refit_failures`, `stages`, and `performance` for diagnostics.
+The installed benchmark at
+`system.file("benchmarks", "compare_autotune_speed.R", package = "CRAFT")`
+compares cached and uncached full-budget tuning with staged tuning.
 
 ## License
 

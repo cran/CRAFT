@@ -591,13 +591,21 @@
     }
     fit_args$series <- train_series
     fit_args$volumes <- train_volumes
-    fit_args$seed <- as.integer(fit_args$seed) + point_id
+    fit_args$seed <- if (isTRUE(task$score_only)) {
+      as.integer((as.double(fit_args$seed) + point_id) %% .Machine$integer.max)
+    } else as.integer(fit_args$seed) + point_id
     fit_args$n_testing <- 0L
     fit_args$backtest_parallel <- FALSE
     fit_args$backtest_workers <- 1L
     fit_args$return_train_probs <- FALSE
     fit_args$verbose <- FALSE
-    fit <- do.call(craft_fit, fit_args)
+    if (isTRUE(task$score_only)) {
+      fit_args$.score_only <- TRUE
+      fit_args$.cache <- task$cache
+      fit <- do.call(.craft_fit_impl, fit_args)
+    } else {
+      fit <- do.call(craft_fit, fit_args)
+    }
     asset_names <- colnames(series)
     last_level <- as.numeric(series[origin, asset_names, drop = TRUE])
     names(last_level) <- asset_names
@@ -692,7 +700,7 @@
 
 .v5_parallel_export_names <- function(export_env) {
   candidates <- c(
-    "craft_fit", "trajectory_embedding", "trajectory_reframer",
+    "craft_fit", ".craft_fit_impl", ".craft_fast_cached", ".craft_fast_regimes", "trajectory_embedding", "trajectory_reframer",
     "svd_changepoint_regimes", "trajectory_forecast", "smooth_quantile_distribution",
     "time_volume_weights", "denoiser",
     ".align_named_probs", ".sanitize_regime_weights", ".prob_entropy01", ".effective_n",
@@ -790,6 +798,59 @@ craft_fit <- function(
   # Diagnostics
   return_train_probs = TRUE,
   verbose = TRUE
+) {
+  args <- mget(names(as.list(match.call())[-1L]), envir = environment(), inherits = FALSE)
+  out <- do.call(.craft_fit_impl, args)
+  out$call <- match.call()
+  out
+}
+
+.craft_fit_impl <- function(
+  series, volumes = NULL,
+  window = 20,
+  n_draws = 1000,
+  n_factors = 3, 
+  var_threshold = 0.95,
+  horizon = NULL,
+  seed = 42,
+
+  # Transition engine parameters
+  transition_alpha = 1,
+  transition_min_count = 1,
+  transition_key_sep = "\r",
+
+  # Validation
+  valid_frac = 0.20,
+  valid_split = c("last", "random", "blocked"),
+
+  # Internal backtesting
+  n_testing = 0L,
+  backtest_parallel = TRUE,
+  backtest_workers = NULL,
+  backtest_min_train = NULL,
+
+  # Weight used by regime_sampler()
+  sampler_weight = c("uniform",
+    "weighted_bal_acc",
+    "bal_acc",
+    "weighted_acc",
+    "acc"
+  ),
+  tail_penalty_lambda = 0,
+  tail_penalty_threshold = 3,
+  tail_penalty_power = 2,
+  tail_penalty_aggregation = c("mean", "max", "sum"),
+  tail_penalty_scope = c("forecast", "all"),
+  volume_alpha = 1,  max_regimes_per_factor = 6,
+  factor_selection = "fixed",
+  min_segment = 30L,
+  past_regime_args = list(),
+  future_regime_args = list(),
+
+  # Diagnostics
+  return_train_probs = TRUE,
+  verbose = TRUE,
+  .score_only = FALSE, .cache = NULL
 ) {
 
   sampler_weight <- match.arg(sampler_weight)
@@ -921,9 +982,9 @@ craft_fit <- function(
   # 1) trajectory_embedding
   # ============================================================
 
-  trajectory_model <- trajectory_embedding(
-    series,
-    window
+  trajectory_model <- .craft_fast_cached(
+    .cache, list("embedding", nrow(series), window),
+    function() trajectory_embedding(series, window)
   )
   
   # ============================================================
@@ -954,9 +1015,11 @@ craft_fit <- function(
     future_regime_args
   )
 
-  past_regime_model <- do.call(svd_changepoint_regimes, past_regime_call)
+  past_regime_model <- .craft_fast_regimes(
+    .cache, list("past", nrow(series), window, past_regime_args$X), past_regime_call)
 
-  future_regime_model <- do.call(svd_changepoint_regimes, future_regime_call)
+  future_regime_model <- .craft_fast_regimes(
+    .cache, list("future", nrow(series), window, horizon, future_regime_args$X), future_regime_call)
 
   past_labels <- past_regime_model$regimes
 
@@ -1154,6 +1217,15 @@ craft_fit <- function(
   )
 
   trajectory_draws <- trajectory_alignment$trajectory_draws
+
+  if (isTRUE(.score_only)) {
+    return(list(
+      trajectory_draws = trajectory_draws,
+      valid_acc = mean(classifier_metrics$accuracy, na.rm = TRUE),
+      valid_bal_acc = mean(classifier_metrics$balanced_accuracy, na.rm = TRUE),
+      valid_joint_acc = classifier$diagnostics$valid_joint_acc
+    ))
+  }
   
   corr_by_horizon <- lapply(seq_len(window), function(h) {
     cols <- paste0(colnames(series), "_cum_lead_", h)

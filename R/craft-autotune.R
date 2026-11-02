@@ -139,62 +139,6 @@
   list(score = as.numeric(score), overall = overall)
 }
 
-.craft_autotune_evaluate_one <- function(task) {
-  tryCatch({
-    fit_args <- utils::modifyList(task$base_args, task$params, keep.null = TRUE)
-    fit_args$seed <- as.integer((as.double(task$seed) + task$model_id) %% .Machine$integer.max)
-    fit <- do.call(craft_fit, fit_args)
-    scored <- .craft_autotune_score_fit(fit, task$score_metric)
-    if (length(scored$score) != 1L || !is.finite(scored$score)) {
-      stop("The selected backtest score is not finite.")
-    }
-    if (nrow(fit$backtest$failures)) stop("One or more backtest origins failed.")
-    param_row <- .craft_autotune_param_row(task$params)
-
-    result <- cbind(
-      data.frame(
-        model_id = task$model_id,
-        ok = TRUE,
-        score = scored$score,
-        error = NA_character_,
-        stringsAsFactors = FALSE
-      ),
-      scored$overall,
-      param_row
-    )
-
-    list(
-      ok = TRUE,
-      model_id = task$model_id,
-      params = task$params,
-      result = result,
-      fit = fit,
-      error = NA_character_
-    )
-  }, error = function(e) {
-    param_row <- .craft_autotune_param_row(task$params)
-    result <- cbind(
-      data.frame(
-        model_id = task$model_id,
-        ok = FALSE,
-        score = Inf,
-        error = conditionMessage(e),
-        stringsAsFactors = FALSE
-      ),
-      param_row
-    )
-
-    list(
-      ok = FALSE,
-      model_id = task$model_id,
-      params = task$params,
-      result = result,
-      fit = NULL,
-      error = conditionMessage(e)
-    )
-  })
-}
-
 .craft_autotune_bind_rows <- function(x) {
   x <- Filter(Negate(is.null), x)
 
@@ -302,171 +246,374 @@
   scores
 }
 
-#' Tune CRAFT hyperparameters by random search
-#'
-#' See the craft_autotune manual page for search specifications, scoring,
-#' parallel execution, and the returned candidate diagnostics.
-craft_autotune <- function(
-  series,
-  volumes = NULL,
-  n_models = 30L,
-  top_k = 5L,
-  n_testing = 5L,
-  search_space = NULL,
-  score_metric = c(
-    "return_rmse",
-    "return_mae",
-    "level_rmse",
-    "level_mae",
-    "coverage_90_gap",
-    "direction_accuracy",
-    "composite"
-  ),
-  seed = 42,
-  fixed_args = list(),
-  composite_weights = NULL,
-  keep_all_fits = FALSE,
-  search_parallel = FALSE,
-  search_workers = NULL,
-  verbose = TRUE,
-  ...
-) {
-  score_metric <- match.arg(score_metric)
-  .craft_autotune_integer(n_models, "n_models")
-  .craft_autotune_integer(top_k, "top_k")
-  .craft_autotune_integer(n_testing, "n_testing")
-  .craft_autotune_integer(seed, "seed", lower = 0)
-  for (nm in c("search_parallel", "keep_all_fits", "verbose")) {
-    x <- get(nm)
-    if (!is.logical(x) || length(x) != 1L || is.na(x)) {
-      stop("`", nm, "` must be TRUE or FALSE.")
-    }
+
+# Caches belong to a single search and a single immutable input history.
+# Prefix length is therefore sufficient to identify a training data set.
+.craft_fast_cache <- function(size) {
+  x <- new.env(parent = emptyenv())
+  x$values <- new.env(parent = emptyenv())
+  x$keys <- list()
+  x$next_id <- 0
+  x$order <- character()
+  x$size <- size
+  x$hits <- 0L
+  x$misses <- 0L
+  x
+}
+
+.craft_fast_cached <- function(cache, key, compute) {
+  if (is.null(cache)) return(compute())
+  serialized <- serialize(key, NULL, version = 2)
+  matched <- which(vapply(cache$keys, identical, logical(1), serialized))
+  if (length(matched)) {
+    key <- names(cache$keys)[matched[1L]]
+    cache$hits <- cache$hits + 1L
+    cache$order <- c(setdiff(cache$order, key), key)
+    return(get(key, envir = cache$values, inherits = FALSE))
   }
+  cache$misses <- cache$misses + 1L
+  value <- compute()
+  if (length(cache$order) >= cache$size) {
+    rm(list = cache$order[1L], envir = cache$values)
+    cache$keys[[cache$order[1L]]] <- NULL
+    cache$order <- cache$order[-1L]
+  }
+  cache$next_id <- cache$next_id + 1
+  key <- as.character(cache$next_id)
+  cache$keys[[key]] <- serialized
+  assign(key, value, envir = cache$values)
+  cache$order <- c(cache$order, key)
+  value
+}
+
+.craft_fast_regimes <- function(cache, key, args) {
+  # Stochastic/bootstrap and plotting calls must execute on every invocation.
+  if (isTRUE(args$stability_bootstrap) || !is.null(args$seed) || isTRUE(args$plot)) {
+    return(do.call(svd_changepoint_regimes, args))
+  }
+  settings <- args[setdiff(names(args), "X")]
+  .craft_fast_cached(cache, c(key, list(settings)),
+                     function() do.call(svd_changepoint_regimes, args))
+}
+
+.craft_fast_worker_state <- new.env(parent = emptyenv())
+
+.craft_fast_worker_init <- function(context) {
+  state <- new.env(parent = emptyenv())
+  state$context <- context
+  state$cache <- if (context$cache) .craft_fast_cache(context$cache_size) else NULL
+  .craft_fast_worker_state$state <- state
+  invisible(NULL)
+}
+
+.craft_fast_worker <- function(task, state = NULL) {
+  if (is.null(state)) state <- .craft_fast_worker_state$state
+  context <- state$context
+  before <- if (is.null(state$cache)) c(0L, 0L) else c(state$cache$hits, state$cache$misses)
+  started <- proc.time()[[3L]]
+  origins <- lapply(task$points, function(point) {
+    args <- task$args
+    args$seed <- task$seed
+    # The point ID is stable across stages and scheduling assignments.
+    set.seed(as.integer((as.double(task$seed) + point) %% .Machine$integer.max))
+    out <- .v5_backtest_one_origin(list(
+      series = context$series, volumes = context$volumes,
+      origin = context$origins[point], point_id = point,
+      horizons = .v5_backtest_horizons(args$window, args$horizon),
+      fit_args = args, score_only = TRUE, cache = state$cache
+    ))
+    if (out$ok) {
+      # No regime models, sampled trajectories, distributions, or closures cross
+      # the worker boundary. These columns suffice for all standard summaries.
+      keep <- c("point_id", "origin_index", "asset", "horizon",
+                "return_abs_error", "return_sq_error", "level_abs_error",
+                "level_sq_error", "covered_90", "direction_correct", "p_actual")
+      out$predictions <- out$predictions[, keep, drop = FALSE]
+    }
+    out
+  })
+  after <- if (is.null(state$cache)) c(0L, 0L) else c(state$cache$hits, state$cache$misses)
+  list(model_id = task$model_id, points = task$points, origins = origins,
+       performance = data.frame(model_id = task$model_id,
+         origins_computed = length(task$points),
+         elapsed = proc.time()[[3L]] - started,
+         cache_hits = after[1L] - before[1L],
+         cache_misses = after[2L] - before[2L]))
+}
+
+.craft_fast_backtest <- function(point_results, origins, horizons) {
+  predictions <- .v5_bind_rows(lapply(point_results, function(x) {
+    if (isTRUE(x$ok)) x$predictions else NULL
+  }))
+  failures <- .v5_bind_rows(lapply(point_results, function(x) {
+    if (isTRUE(x$ok)) return(NULL)
+    data.frame(point_id = x$point_id, origin_index = x$origin_index, error = x$error)
+  }))
+  list(settings = list(actual_n_testing = length(point_results),
+         origins = origins, horizons = horizons, scoring_only = TRUE),
+       predictions = predictions, failures = failures,
+       summary = .v5_backtest_summary(predictions))
+}
+
+.craft_fast_validate <- function(n_models, top_k, n_testing, seed, search_workers,
+                                 cache_size, survivor_fraction, flags,
+                                 search_space, fixed_args, dots, weights) {
+  for (nm in c("n_models", "top_k", "n_testing", "cache_size")) {
+    .craft_autotune_integer(get(nm), nm)
+  }
+  .craft_autotune_integer(seed, "seed", lower = 0)
   if (!is.null(search_workers)) .craft_autotune_integer(search_workers, "search_workers")
-  if (is.null(search_space)) search_space <- .craft_autotune_default_search_space()
-  .craft_autotune_named_list(search_space, "search_space")
-  .craft_autotune_named_list(fixed_args, "fixed_args")
-  dots <- list(...)
-  .craft_autotune_named_list(dots, "...")
+  for (nm in names(flags)) {
+    x <- flags[[nm]]
+    if (!is.logical(x) || length(x) != 1L || is.na(x)) stop("`", nm, "` must be TRUE or FALSE.")
+  }
+  if (!is.numeric(survivor_fraction) || length(survivor_fraction) != 1L ||
+      !is.finite(survivor_fraction) || survivor_fraction <= 0 || survivor_fraction > 1) {
+    stop("`survivor_fraction` must be in (0, 1].")
+  }
   allowed <- setdiff(names(formals(craft_fit)), c("series", "volumes", "seed", "n_testing"))
   for (nm in c("search_space", "fixed_args", "dots")) {
-    unknown <- setdiff(names(get(nm)), allowed)
+    x <- get(nm)
+    .craft_autotune_named_list(x, nm)
+    unknown <- setdiff(names(x), allowed)
     if (length(unknown)) stop("Unknown or reserved craft_fit arguments in `", nm,
                               "`: ", paste(unknown, collapse = ", "))
   }
-  if (search_parallel && "backtest_parallel" %in% names(search_space)) {
-    stop("Cannot tune `backtest_parallel` during parallel search.")
-  }
+  if (any(c("backtest_parallel", "backtest_workers", "verbose", "return_train_probs") %in%
+          names(search_space))) stop("Execution/diagnostic controls cannot be tuned in fast search.")
   invisible(lapply(search_space, .craft_autotune_validate_spec))
-  if (!is.null(composite_weights)) {
-    if (is.list(composite_weights)) composite_weights <- unlist(composite_weights)
-    valid_names <- c("return_rmse", "return_mae", "level_rmse", "level_mae",
-                     "coverage_90_gap", "direction_error", "mean_p_actual_gap")
-    if (!is.numeric(composite_weights) || !length(composite_weights) ||
-        is.null(names(composite_weights)) || anyNA(names(composite_weights)) ||
-        anyDuplicated(names(composite_weights)) ||
-        any(!names(composite_weights) %in% valid_names) ||
-        any(!is.finite(composite_weights) | composite_weights < 0) ||
-        !any(composite_weights > 0)) {
-      stop("`composite_weights` must have unique known names and finite non-negative weights, with at least one positive weight.")
-    }
+  if (!is.null(weights)) {
+    weights <- unlist(weights)
+    known <- c("return_rmse", "return_mae", "level_rmse", "level_mae",
+               "coverage_90_gap", "direction_error", "mean_p_actual_gap")
+    if (!is.numeric(weights) || !length(weights) || is.null(names(weights)) ||
+        anyNA(names(weights)) || anyDuplicated(names(weights)) ||
+        any(!names(weights) %in% known) || any(!is.finite(weights) | weights < 0) ||
+        !any(weights > 0)) stop("Invalid `composite_weights`.")
   }
-
-  set.seed(seed)
-  sampled_params <- lapply(seq_len(n_models), function(i) .craft_autotune_draw_params(search_space))
-
-  base_args <- utils::modifyList(dots, fixed_args, keep.null = TRUE)
-  base_args$series <- as.data.frame(series, stringsAsFactors = FALSE)
-  base_args$volumes <- volumes
-  base_args$n_testing <- n_testing
-
-  if (is.null(base_args$backtest_parallel)) {
-    base_args$backtest_parallel <- FALSE
-  }
-
-  if (is.null(base_args$return_train_probs)) {
-    base_args$return_train_probs <- FALSE
-  }
-
-  if (is.null(base_args$verbose)) {
-    base_args$verbose <- FALSE
-  }
-
-  if (search_parallel) base_args$backtest_parallel <- FALSE
-
-  tasks <- lapply(seq_len(n_models), function(i) {
-    list(
-      model_id = i,
-      params = sampled_params[[i]],
-      base_args = base_args,
-      score_metric = score_metric,
-      seed = seed
-    )
-  })
-
-  if (isTRUE(search_parallel) && n_models > 1L) {
-    workers <- if (is.null(search_workers)) 2L else search_workers
-    workers <- min(workers, n_models)
-
-    if (verbose) message("Running random search in parallel with ", workers, " workers.")
-
-    cl <- parallel::makeCluster(workers)
-    on.exit(parallel::stopCluster(cl), add = TRUE)
-    results <- parallel::parLapply(cl, tasks, .craft_autotune_evaluate_one)
-  } else {
-    if (verbose) message("Running random search serially over ", n_models, " models.")
-    results <- lapply(tasks, .craft_autotune_evaluate_one)
-  }
-
-  result_table <- .craft_autotune_bind_rows(lapply(results, `[[`, "result"))
-
-  if (score_metric == "composite") {
-    result_table$score <- .craft_autotune_composite_scores(result_table, composite_weights)
-  }
-
-  score_by_model_id <- stats::setNames(result_table$score, result_table$model_id)
-  ok_idx <- which(vapply(results, function(x) {
-    score <- score_by_model_id[as.character(x$model_id)]
-    isTRUE(x$ok) && length(score) == 1L && is.finite(score)
-  }, logical(1)))
-  ok_idx <- ok_idx[order(vapply(results[ok_idx], function(x) score_by_model_id[as.character(x$model_id)], numeric(1)))]
-  top_idx <- head(ok_idx, min(top_k, length(ok_idx)))
-
-  top_models <- lapply(top_idx, function(i) {
-    list(
-      model_id = results[[i]]$model_id,
-      params = results[[i]]$params,
-      score = unname(score_by_model_id[as.character(results[[i]]$model_id)]),
-      fit = results[[i]]$fit
-    )
-  })
-
-  all_fits <- if (isTRUE(keep_all_fits)) lapply(results, `[[`, "fit") else NULL
-
-  out <- list(
-    call = match.call(),
-    score_metric = score_metric,
-    search_space = search_space,
-    results = result_table,
-    top_models = top_models,
-    failures = result_table[!result_table$ok, , drop = FALSE],
-    all_fits = all_fits,
-    settings = list(
-      n_models = n_models,
-      top_k = top_k,
-      n_testing = n_testing,
-      seed = seed,
-      composite_weights = composite_weights,
-      search_parallel = search_parallel,
-      search_workers = search_workers,
-      keep_all_fits = keep_all_fits
-    )
-  )
-
-  if (!length(top_models)) warning("No candidate produced a finite score; inspect $failures.")
-  class(out) <- c("craft_autotune", class(out))
-  out
 }
 
-
-
+#' Fast staged random-search tuning for CRAFT
+#'
+#' See the craft_autotune manual page for stage budgets, cache scope,
+#' compact scoring results, and deferred fitting of selected candidates.
+craft_autotune <- function(
+  series, volumes = NULL, n_models = 30L, top_k = 5L, n_testing = 5L,
+  search_space = NULL,
+  score_metric = c("return_rmse", "return_mae", "level_rmse", "level_mae",
+                   "coverage_90_gap", "direction_accuracy", "composite"),
+  seed = 42, fixed_args = list(), composite_weights = NULL,
+  keep_all_fits = FALSE, search_parallel = FALSE, search_workers = NULL,
+  stage_budgets = NULL, survivor_fraction = 0.3,
+  cache = TRUE, cache_size = 64L, verbose = TRUE, ...
+) {
+  score_metric <- match.arg(score_metric)
+  if (is.null(search_space)) search_space <- .craft_autotune_default_search_space()
+  dots <- list(...)
+  .craft_fast_validate(n_models, top_k, n_testing, seed, search_workers,
+    cache_size, survivor_fraction,
+    list(keep_all_fits = keep_all_fits, search_parallel = search_parallel,
+         cache = cache, verbose = verbose), search_space, fixed_args, dots,
+    composite_weights)
+  if (is.null(stage_budgets)) stage_budgets <- unique(c(min(2L, n_testing), n_testing))
+  if (!is.numeric(stage_budgets) || !length(stage_budgets) ||
+      any(!is.finite(stage_budgets)) || any(stage_budgets < 1) ||
+      any(stage_budgets != floor(stage_budgets)) || any(diff(stage_budgets) <= 0) ||
+      tail(stage_budgets, 1L) != n_testing) {
+    stop("`stage_budgets` must be increasing positive integers ending at `n_testing`.")
+  }
+  if (!is.matrix(series) && !is.data.frame(series)) stop("`series` must be a matrix or data frame.")
+  series <- as.data.frame(series, stringsAsFactors = FALSE)
+  if (!nrow(series) || !ncol(series) || !all(vapply(series, is.numeric, logical(1)))) {
+    stop("`series` must contain numeric time-series columns and observations.")
+  }
+  if (!is.null(volumes)) {
+    if ((!is.matrix(volumes) && !is.data.frame(volumes)) ||
+        !identical(dim(volumes), dim(series))) stop("`volumes` must match the dimensions of `series`.")
+    volumes <- as.data.frame(volumes)
+  }
+  default_exprs <- formals(craft_fit)
+  default_exprs$series <- NULL
+  defaults <- lapply(default_exprs, eval, envir = environment(craft_fit))
+  base_args <- utils::modifyList(defaults, utils::modifyList(dots, fixed_args,
+                                keep.null = TRUE), keep.null = TRUE)
+  base_args[c("series", "volumes")] <- NULL
+  base_args$n_testing <- 0L
+  base_args$backtest_parallel <- FALSE
+  base_args$backtest_workers <- 1L
+  base_args$return_train_probs <- FALSE
+  base_args$verbose <- FALSE
+  # Resolve match.arg defaults before serializing them as explicit arguments.
+  for (nm in c("valid_split", "sampler_weight", "tail_penalty_aggregation", "tail_penalty_scope")) {
+    if (!nm %in% c(names(dots), names(fixed_args))) base_args[[nm]] <- base_args[[nm]][1L]
+  }
+  set.seed(seed)
+  sampled_params <- lapply(seq_len(n_models), function(i) .craft_autotune_draw_params(search_space))
+  args <- lapply(sampled_params, function(p) utils::modifyList(base_args, p, keep.null = TRUE))
+  seeds <- as.integer((as.double(seed) + seq_len(n_models)) %% .Machine$integer.max)
+  errors <- rep(NA_character_, n_models)
+  minimum <- maximum <- rep(NA_real_, n_models)
+  for (i in seq_len(n_models)) {
+    tryCatch({
+      a <- args[[i]]
+      .craft_autotune_integer(a$window, "window")
+      .craft_autotune_integer(a$min_segment, "min_segment")
+      .craft_autotune_integer(a$n_draws, "n_draws")
+      if (a$window >= nrow(series)) stop("`window` must be shorter than the series.")
+      if (!is.null(a$horizon)) {
+        .craft_autotune_integer(a$horizon, "horizon")
+        if (a$horizon > a$window) stop("`horizon` cannot exceed `window`.")
+      }
+      if (!is.null(a$backtest_min_train)) .craft_autotune_integer(a$backtest_min_train, "backtest_min_train")
+      lo <- if (is.null(a$backtest_min_train)) {
+        max(a$window + 2L, a$window + 2L * a$min_segment, 3L * a$window)
+      } else max(a$window + 1L, a$backtest_min_train)
+      hi <- nrow(series) - max(.v5_backtest_horizons(a$window, a$horizon))
+      if (lo > hi) stop("No feasible backtest origins for this candidate.")
+      minimum[i] <- lo
+      maximum[i] <- hi
+    }, error = function(e) { errors[i] <<- conditionMessage(e) })
+  }
+  valid <- which(is.na(errors))
+  origins <- integer()
+  if (length(valid)) {
+    lo <- max(minimum[valid])
+    hi <- min(maximum[valid])
+    if (lo > hi) stop("Candidates have no common backtest origins; narrow the search space.")
+    origins <- if (n_testing == 1L) as.integer(hi) else {
+      unique(as.integer(round(seq(lo, hi, length.out = n_testing))))
+    }
+  }
+  # First stage spans the full origin grid; later stages add rather than refit.
+  priority <- if (length(origins)) unique(c(1L, length(origins), seq_along(origins))) else integer()
+  budgets <- if (length(origins)) unique(pmin(stage_budgets, length(origins))) else integer()
+  context <- list(series = series, volumes = volumes, origins = origins,
+                  cache = cache, cache_size = cache_size)
+  state <- new.env(parent = emptyenv())
+  state$context <- context
+  state$cache <- if (cache) .craft_fast_cache(cache_size) else NULL
+  cl <- NULL
+  workers <- 1L
+  if (search_parallel && length(valid) > 1L) {
+    workers <- min(if (is.null(search_workers)) 2L else search_workers, length(valid))
+    cl <- parallel::makeCluster(workers)
+    on.exit(if (!is.null(cl)) parallel::stopCluster(cl), add = TRUE)
+    # Export the immutable history once, not once per candidate or stage.
+    parallel::clusterCall(cl, .craft_fast_worker_init, context)
+  }
+  point_results <- lapply(seq_len(n_models), function(i) vector("list", length(origins)))
+  backtests <- vector("list", n_models)
+  rows <- lapply(seq_len(n_models), function(i) {
+    cbind(data.frame(model_id = i, ok = FALSE, score = Inf,
+      error = errors[i], stage = 0L, n_testing = 0L,
+      status = if (is.na(errors[i])) "pending" else "failed", selected = FALSE),
+      .craft_autotune_param_row(sampled_params[[i]]))
+  })
+  stages <- performance <- list()
+  active <- valid
+  for (stage in seq_along(budgets)) {
+    if (!length(active)) break
+    points <- sort(priority[seq_len(budgets[stage])])
+    if (verbose) message("Fast tuning stage ", stage, ": ", length(active),
+                         " candidates, ", length(points), " origins each.")
+    tasks <- lapply(active, function(i) list(model_id = i, args = args[[i]],
+      seed = seeds[i], points = points[vapply(point_results[[i]][points], is.null, logical(1))]))
+    evaluated <- if (is.null(cl)) lapply(tasks, .craft_fast_worker, state = state) else {
+      parallel::parLapplyLB(cl, tasks, .craft_fast_worker, chunk.size = 1L)
+    }
+    for (item in evaluated) {
+      i <- item$model_id
+      point_results[[i]][item$points] <- item$origins
+      perf <- item$performance
+      perf$stage <- stage
+      performance[[length(performance) + 1L]] <- perf
+      bt <- .craft_fast_backtest(point_results[[i]][points], origins[points],
+                                .v5_backtest_horizons(args[[i]]$window, args[[i]]$horizon))
+      backtests[[i]] <- bt
+      error <- tryCatch({
+        if (nrow(bt$failures)) stop(paste(unique(bt$failures$error), collapse = "; "))
+        scored <- .craft_autotune_score_fit(list(backtest = bt), score_metric)
+        if (length(scored$score) != 1L || !is.finite(scored$score)) stop("Non-finite backtest score.")
+        rows[[i]] <- cbind(data.frame(model_id = i, ok = TRUE,
+          score = scored$score, error = NA_character_, stage = stage,
+          n_testing = length(points), status = "evaluated", selected = FALSE),
+          scored$overall, .craft_autotune_param_row(sampled_params[[i]]))
+        NA_character_
+      }, error = function(e) conditionMessage(e))
+      if (!is.na(error)) {
+        rows[[i]]$ok <- FALSE
+        rows[[i]]$error <- error
+        rows[[i]]$score <- Inf
+        rows[[i]]$stage <- stage
+        rows[[i]]$n_testing <- length(points)
+        rows[[i]]$status <- "failed"
+      }
+    }
+    table <- .craft_autotune_bind_rows(rows[active])
+    if (score_metric == "composite") {
+      table$score <- .craft_autotune_composite_scores(table, composite_weights)
+      for (j in seq_len(nrow(table))) rows[[table$model_id[j]]]$score <- table$score[j]
+    }
+    eligible <- table$model_id[table$ok & is.finite(table$score)]
+    ordered <- eligible[order(vapply(rows[eligible], function(x) x$score, numeric(1)), eligible)]
+    final <- stage == length(budgets)
+    survivors <- if (final) ordered else utils::head(ordered,
+      max(top_k, ceiling(length(active) * survivor_fraction)))
+    for (i in setdiff(ordered, survivors)) rows[[i]]$status <- "screened"
+    for (i in survivors) rows[[i]]$status <- if (final) "finalist" else "promoted"
+    stages[[length(stages) + 1L]] <- list(stage = stage, budget = length(points),
+      origins = origins[points], results = table, promoted = survivors)
+    active <- survivors
+  }
+  if (!is.null(cl)) { parallel::stopCluster(cl); cl <- NULL }
+  finalists <- active
+  fits <- vector("list", n_models)
+  refit_failures <- list()
+  selected <- integer()
+  refit <- function(i) {
+    a <- args[[i]]
+    a$series <- series
+    a$volumes <- volumes
+    a$seed <- seeds[i]
+    a$n_testing <- 0L
+    set.seed(seeds[i])
+    fit <- do.call(craft_fit, a)
+    fit$backtest <- backtests[[i]]
+    fit$diagnostics$backtest <- fit$backtest$summary
+    fit$diagnostics$backtest_settings <- fit$backtest$settings
+    fit
+  }
+  refit_ids <- if (keep_all_fits) {
+    c(finalists, setdiff(which(vapply(rows, function(x) isTRUE(x$ok), logical(1))), finalists))
+  } else finalists
+  for (i in refit_ids) {
+    if (!keep_all_fits && length(selected) >= top_k) break
+    attempt <- tryCatch(list(fit = refit(i)), error = function(e) list(error = conditionMessage(e)))
+    if (!is.null(attempt$error)) {
+      refit_failures[[length(refit_failures) + 1L]] <- data.frame(model_id = i, error = attempt$error)
+      rows[[i]]$status <- "refit_failed"
+    } else {
+      fits[[i]] <- attempt$fit
+      if (i %in% finalists && length(selected) < top_k) selected <- c(selected, i)
+    }
+  }
+  for (i in selected) rows[[i]]$selected <- TRUE
+  result_table <- .craft_autotune_bind_rows(rows)
+  top_models <- lapply(selected, function(i) list(model_id = i, params = sampled_params[[i]],
+    score = rows[[i]]$score, fit = fits[[i]]))
+  if (!length(top_models)) warning("No candidate produced a usable final fit; inspect $failures and $refit_failures.")
+  out <- list(call = match.call(), score_metric = score_metric, search_space = search_space,
+    results = result_table, top_models = top_models,
+    failures = result_table[!result_table$ok, , drop = FALSE],
+    refit_failures = .v5_bind_rows(refit_failures),
+    all_fits = if (keep_all_fits) fits else NULL,
+    stages = stages, performance = .v5_bind_rows(performance),
+    settings = list(n_models = n_models, top_k = top_k, n_testing = n_testing,
+      actual_n_testing = length(origins), origins = origins, seed = seed,
+      stage_budgets = budgets, survivor_fraction = survivor_fraction,
+      search_parallel = search_parallel, search_workers = workers,
+      cache = cache, cache_size = cache_size, keep_all_fits = keep_all_fits,
+      composite_weights = composite_weights))
+  class(out) <- c("craft_autotune", "list")
+  out
+}
